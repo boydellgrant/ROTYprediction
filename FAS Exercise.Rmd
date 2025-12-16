@@ -1,0 +1,249 @@
+---
+title: "Future Analytics Stars Exercise"
+author: "Grant Boydell"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+My name is Grant Boydell and the following R Markdown document walks through the building of a logistic regression model to predict the ROTY winner in the 2025-26 NBA season. 
+
+## Obtaining and Cleaning the Data
+
+I first needed to acquire the data and clean the data set to construct a useful and easy-to-use set for the modeling process. I did this all use the hoopR package for obtaining the data and base R as well as the dplyr library for cleaning the data set. I simply created a vector of years that I wanted to look at (back to the 2002-03 season) and looped through that vector using the nba_leaguedashplayerstats() function and the argument player_experience to get a data set of rookie player data, both basic and advanced statistics. Additionally, through the loops, I created a new column that distinguished the season for each row.
+
+```{r, Getting the Data}
+library(hoopR)
+library(dplyr)
+
+years <- c("2002-03", "2003-04", "2004-05", "2005-06", "2006-07", "2007-08", "2008-09",
+           "2009-10", "2010-11", "2011-12", "2012-13", "2013-14", "2015-16", "2016-17",
+           "2017-18", "2018-19", "2019-20", "2020-21", "2021-22", "2022-23", "2023-24",
+           "2024-25")
+
+rookies <- data.frame()
+
+for (i in years){
+  add <- nba_leaguedashplayerstats(
+    season = i, 
+    player_experience = "Rookie",
+    per_mode = "PerGame"
+  )
+  add <- add[[1]]
+  add$season <- i
+  
+  rookies <- rbind(rookies, add)
+  
+  Sys.sleep(runif(1, 0.5, 1.2))
+}
+
+rookies_adv <- data.frame()
+
+for (i in years){
+  add <- nba_leaguedashplayerstats(
+    season = i, 
+    player_experience = "Rookie",
+    per_mode = "PerGame",
+    measure_type = "Advanced"
+  )
+  add <- add[[1]]
+  add$season <- i
+  
+  rookies_adv <- rbind(rookies_adv, add)
+  
+  Sys.sleep(runif(1, 0.5, 1.2))
+}
+```
+
+In this next chunk, I take the two data sets and simply combined them. I had to remove any duplicate columns (except PLAYER_ID, which I use to join the data frames) at first and then simply join the data frames based on the PLAYER_ID column, which is a unique ID for each NBA rookie across the data.
+
+```{r, Combining the Data}
+rookies_adv <- rookies_adv %>%
+  select(-any_of(names(rookies)[names(rookies) != "PLAYER_ID"]))
+
+rookies_full <- rookies %>%
+  left_join(rookies_adv, by = c("PLAYER_ID"))
+
+#rookies_full <- rookies_full[rookies_full$GP > 40, ]
+
+#write.csv(rookies_full, "rookies_dataset.csv")
+```
+
+This next chunk codes in the ROTY winners, which was done through creating a vector of all the names of past winners, and simply adding, in a new column called roty_winner, a 1 for the players that won ROTY and a 0 if they did not. Next, I simply ensured that all columns (except columns that needed to stay as character columns) were all numeric, so that analysis is accurate. Using this, I then created a new data frame called winner_view, that was simply a subsetted data frame of the full set that only looked at the statistics of ROTY winners, allowing a close analysis at the qualities of winners of this award.
+
+```{r, Adding ROTY Winners}
+roty_winners <- c("Amar'e Stoudemire", "LeBron James", "Emeka Okafor", "Chris Paul", 
+                  "Brandon Roy", "Kevin Durant", "Derrick Rose", "Tyreke Evans", 
+                  "Blake Griffin", "Kyrie Irving", "Damian Lillard", 
+                  "Michael Carter-Williams", "Andrew Wiggins", "Karl Anthony-Towns",
+                  "Malcolm Brogdan", "Ben Simmons", "Luka Dončić", "Ja Morant",
+                  "LaMelo Ball", "Scottie Barnes", "Paolo Banchero", 
+                  "Victor Wembanyama", "Stephon Castle")
+
+rookies_full$roty_winner <- ifelse(rookies_full$PLAYER_NAME %in% roty_winners, 1, 0)
+head(rookies_full[rookies_full$roty_winner == 1, c("PLAYER_NAME", "season")])
+
+rookies_full <- rookies_full %>%
+  mutate(across(c(6:67, 69:125), ~ as.numeric(as.character(.x))))
+
+winner_view <- rookies_full[rookies_full$roty_winner == 1, ]
+```
+
+## Exploratory Data Analysis
+
+In this next chunk, I perform some basic exploratory analysis, which describe my initial analysis of the winners data frame where I attempted to find certain statistics that were shared among ROTY winners. I found through this analysis the importance of feature engineering the variables to include ranks. Since we are wanting to analyze on a yearly basis, it is important to standardize across seasons. For example, as the game changes, there may be more points being scored (more analysis to deem necessary or not!), so a rookie that averaged 20 points in 2005 may be far and away the best scorer in his year. But, 20 points may be the third best scoring number in 2025. This is simply a fake example but demonstrates the importance of engineering the rank variables so each stat is standardized year-to-year so it accounts for the changing game of basketball, or special occurrences that may have arise in certain years. This is already done for me inside the hoopR packages and the specific function used to extract the data.
+
+```{r}
+paste0("The average rank in terms of points scored of ROTY winners is ",
+       mean(winner_view$PTS_RANK))
+paste0("The average rank in terms of assists of ROTY winners is ",
+       mean(winner_view$AST_RANK))
+paste0("The average rank in terms of rebounds of ROTY winners is ",
+       mean(winner_view$REB_RANK))
+paste0("The average rank in terms of field goals made of ROTY winners is ",
+       mean(winner_view$FGM_RANK))
+paste0("The average rank in terms of free throws attempts of ROTY winners is ",
+       mean(winner_view$FTA_RANK))
+paste0("The average rank in terms of NBA fantasy points of ROTY winners is ",
+       mean(winner_view$NBA_FANTASY_PTS_RANK))
+paste0("The average amount of wins for ROTY winners is ", mean(winner_view$W))
+paste0("The average rank in terms of wins for ROTY winners is ", mean(winner_view$W_RANK))
+```
+
+## Building the Model
+
+Now to the model. I chose to use a logistic regression model for various reasons. One, logistic regression deals with binary classification (win or not) and outputs probabilities of certain outcomes, which is exactly what we want. Additionally, it allows us to see the importance of each variable, to see what statistics have the most influence of who win ROTY. So, the balance of interpretation, predictive power, and binary classification lead me to choosing a logistic model. I explain more in the next chunk of code, but I started (via my exploratory analysis) with a selection of variables from the full data set that I deemed valuable to consider when building a logistic regression model. I then did my own form of forward stepwise selection, where I kept adding variables, looking to minimize residual deviance and AIC as I go, which are two measures of goodness-of-fit. One last note is that I subsetted the data to not include the three seasons between 2022 and 2025, so I had a subset to train on and three seasons to test on. I settled on the below model after doing this.
+
+```{r, The Model}
+train <- rookies_full[!(rookies_full$season %in% c("2022-23", "2023-24", "2024-25")), ]
+
+log_model <- glm(roty_winner ~ PTS_RANK + AST_RANK + FGM_RANK + FTA_RANK + W_RANK +
+                   NBA_FANTASY_PTS_RANK,
+                 data = train, family = binomial)
+
+summary(log_model)
+```
+
+## Visualizing AIC Progression
+
+The next chunk visualizes my model selection process in more detail. Since adding variables can increase our residual deviance without actually improving the model, I use the AIC (Alkaline Information Criteria) below, which is a metric that penalizes more variables and rewards when the model fits the data better. The below process of adding variables in this specific order demonstrate how I used AIC in this exercise.
+
+```{r}
+variables <- c("PTS_RANK", "AST_RANK", "FGM_RANK", "FTA_RANK", "W_RANK", "NBA_FANTASY_PTS_RANK", "REB_RANK", "TD3_RANK", "DD2_RANK", "EFG_PCT_RANK", "NET_RATING_RANK")
+
+aic_results <- data.frame(step = integer(), variables = character(), aic = numeric())
+
+for (i in seq_along(variables)) {
+  current_vars <- variables[1:i]
+  
+  formula_i <- as.formula(
+    paste("roty_winner", "~", paste(current_vars, collapse = " + "))
+  )
+  
+  model_i <- glm(formula_i, data = train, family = binomial)
+  
+  aic_results[i, ] <- list(step = i, variables = paste(current_vars, collapse = ", "),
+                           aic = AIC(model_i))
+}
+
+aic_results <- aic_results %>%
+  mutate(change = aic - lag(aic))
+
+#aic_results
+
+plot(aic_results$step, aic_results$aic, type = "b", pch = 16, 
+     col = c(rep("black", times = 5), "red", rep("black", times = 5)),
+     xlab = "Number of Variables", ylab = "AIC",
+     main = "AIC vs. Model Complexity")
+
+#plot(aic_results$step, aic_results$change, type = "b",
+#     xlab = "Number of Variables", ylab = "AIC",
+#     main = "Change in AIC")
+```
+
+## Testing the Logistic Model
+
+Before conducting any tests, I wanted to use a pesudo-R squared for logistic regression to see another metric of goodness-of-fit. The formula is 1 - (Residual Deviance/Null Deviance). The output demonstrates we have a good fitting model, as about 80% of the variation in the probability of winning the award can be explained by our variables.
+
+```{r, R^2}
+1 - (37.657/187.657)
+```
+
+
+Success! We have a model, now let's test it. The below three chunks walk through how I tested the model, simply calculating the probability each rookies won the award, for 2022-23, 2023-24 and 2024-25. The result is the model predicted correctly all three winners (highest probability) of the ROTY award for the respective years.
+
+```{r, Testing the Model}
+rookies_2023 <- rookies_full[rookies_full$season == "2022-23", ]
+
+rookies_2023$prob <- predict(log_model, rookies_2023, type = "response")
+head(rookies_2023[order(-rookies_2023$prob), c("PLAYER_NAME", "season", "prob")])
+```
+
+```{r, Testing the Model}
+rookies_2024 <- rookies_full[rookies_full$season == "2023-24", ]
+
+rookies_2024$prob <- predict(log_model, rookies_2024, type = "response")
+head(rookies_2024[order(-rookies_2024$prob), c("PLAYER_NAME", "season", "prob")])
+```
+
+```{r, Testing the Model}
+rookies_2025 <- rookies_full[rookies_full$season == "2024-25", ]
+
+rookies_2025$prob <- predict(log_model, rookies_2025, type = "response")
+head(rookies_2025[order(-rookies_2025$prob), c("PLAYER_NAME", "season", "prob")])
+```
+
+## 2025-26 Prediction
+
+Now that we have an effective model, let's make our prediction for this year. One note, is that we have a limited sample size, so this can be interpreted as if the season ended today, these would be the odds for the rookie of the year. With further analysis I would utilize a prediction method or implement assumptions that would predict end of the season statistics for these rookies but for this project we will just use stats thus far this season (as of November 28th).
+
+```{r, 2025-26 Prediction}
+rookies_2026_basic <- nba_leaguedashplayerstats(
+    season = "2025-26", 
+    player_experience = "Rookie",
+    per_mode = "PerGame"
+  )
+rookies_2026_basic <- rookies_2026_basic[[1]]
+
+rookies_2026_adv <- nba_leaguedashplayerstats(
+    season = "2025-26", 
+    player_experience = "Rookie",
+    per_mode = "PerGame",
+    measure_type = "Advanced"
+  )
+rookies_2026_adv <- rookies_2026_adv[[1]]
+
+rookies_2026_adv <- rookies_2026_adv %>%
+  select(-any_of(names(rookies_2026_basic)[names(rookies_2026_basic) != "PLAYER_ID"]))
+
+rookies_2026 <- rookies_2026_basic %>%
+  left_join(rookies_2026_adv, by = c("PLAYER_ID"))
+
+rookies_2026 <- rookies_2026 %>%
+  mutate(across(c(6:123), ~ as.numeric(as.character(.x))))
+
+rookies_2026$prob <- predict(log_model, rookies_2026, type = "response")
+head(rookies_2026[order(-rookies_2026$prob), c("PLAYER_NAME", "prob")])
+```
+
+The model predicts that Cooper Flagg would win ROTY if the season ended now, due to his well rounded stats. So while Kon Knueppel is averaging more points, Flagg's standing in terms of rebounds, assists in addition to overall fantasy points pushes him ahead of Knueppel.
+
+```{r, outputting CSV file}
+predictions <- rookies_2026[order(-rookies_2026$prob), c("PLAYER_NAME", "prob")]
+names(predictions) <- c("player_name", "probability")
+write.csv(predictions, "predictions.csv")
+```
+
+## Software + References
+
+@misc{gilani_2021_hoopR,
+  author = {Gilani, Saiem},
+  title = {hoopR: The SportsDataverse's R Package for Men's Basketball Data.},
+  url = {https://hoopR.sportsdataverse.org},
+  year = {2021}
+}
